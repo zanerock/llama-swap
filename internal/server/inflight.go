@@ -250,6 +250,24 @@ func (t *inflightTracker) Current() swaputil.InFlightRequestsEvent {
 	}
 }
 
+// CountByModel returns how many requests are currently in flight per model ID.
+// Requests that carry no model (never dispatched to one) are not counted. The
+// read lock is only ever held for short map operations, so this never blocks on
+// a model load.
+func (t *inflightTracker) CountByModel() map[string]int {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	counts := make(map[string]int, len(t.requests))
+	for _, req := range t.requests {
+		if req.entry.Model == "" {
+			continue
+		}
+		counts[req.entry.Model]++
+	}
+	return counts
+}
+
 func (t *inflightTracker) snapshotLocked() []swaputil.InflightRequestEntry {
 	requests := make([]swaputil.InflightRequestEntry, 0, len(t.requests))
 	for _, req := range t.requests {

@@ -317,6 +317,12 @@ func (s *Server) routes() {
 	mux.Handle("GET /api/hardware", apiChain.ThenFunc(s.handleAPIHardware))
 	mux.Handle("GET /api/captures/{id}", apiChain.ThenFunc(s.handleAPICapture))
 
+	// Read-only model status. Registered on apiChain like the other status
+	// endpoints (/running, /api/*): auth only, no model dispatch, so polling
+	// it can never trigger a swap.
+	mux.Handle("GET /api/status", apiChain.ThenFunc(s.handleAPIStatus))
+	mux.Handle("GET /api/status/{model...}", apiChain.ThenFunc(s.handleAPIStatusModel))
+
 	s.mux = mux
 	s.handler = chain.New(CreateRequestLogMiddleware(s.proxylog), CreateCORSMiddleware()).Then(mux)
 }

@@ -31,6 +31,13 @@ type stubRouter struct {
 	unloadModels  []string
 	unloadTimeout time.Duration
 	loggers       map[string]*logmon.Monitor
+	// serveCalls counts dispatches into the router. Status tests assert it
+	// stays at zero: a dispatch is the only seam through which a request can
+	// make llama-swap load a model.
+	serveCalls atomic.Int32
+	// statuses backs ModelStatus. Models absent from it are reported as not
+	// handled by this router.
+	statuses map[string]router.ModelStatus
 }
 
 func newStubRouter(models []string, response string) *stubRouter {
@@ -44,6 +51,7 @@ func newStubRouter(models []string, response string) *stubRouter {
 func (s *stubRouter) Handles(model string) bool      { return s.models[model] }
 func (s *stubRouter) Shutdown(_ time.Duration) error { s.shutdownCalls.Add(1); return nil }
 func (s *stubRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.serveCalls.Add(1)
 	if s.serveHTTP != nil {
 		s.serveHTTP(w, r)
 		return
@@ -53,6 +61,10 @@ func (s *stubRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *stubRouter) RunningModels() map[string]process.ProcessState { return s.running }
+func (s *stubRouter) ModelStatus(modelID string) (router.ModelStatus, bool) {
+	status, ok := s.statuses[modelID]
+	return status, ok
+}
 func (s *stubRouter) Unload(timeout time.Duration, models ...string) {
 	s.unloadCalls.Add(1)
 	s.unloadTimeout = timeout

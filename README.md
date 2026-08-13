@@ -44,6 +44,8 @@ Built in Go for performance and simplicity, llama-swap has zero dependencies and
   - `/upstream/:model_id` - direct access to upstream server ([demo](https://github.com/mostlygeek/llama-swap/pull/31))
   - `/comfyui/` - ComfyUI compatible endpoint ([#1001](https://github.com/mostlygeek/llama-swap/issues/1001))
   - `/running` - list currently running models ([#61](https://github.com/mostlygeek/llama-swap/issues/61))
+  - `GET /api/status` - status of every configured model in one response
+  - `GET /api/status/:model_id` - status of one model: `state` (`unloaded`, `starting`, `ready` or `unloading`), `busy` (null unless `ready`), `in_flight_requests` and `since` (when the model entered `state`). Read-only and cheap: it never loads, unloads or health checks a model, so it is safe to poll.
   - `POST /api/models/unload` - manually unload all running models ([#58](https://github.com/mostlygeek/llama-swap/issues/58))
   - `POST /api/models/unload/:model_id` - unload a specific model
   - `GET /api/profiles` - list configured profiles and the active selection
