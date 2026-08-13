@@ -65,6 +65,14 @@ type startResult struct {
 	err       error
 }
 
+// stateSnapshot pairs a process state with the time the process entered it.
+// Both fields are published in a single atomic store so a reader can never
+// observe a new state alongside the previous state's timestamp.
+type stateSnapshot struct {
+	state ProcessState
+	since time.Time
+}
+
 type ProcessCommand struct {
 	id        string
 	config    config.ModelConfig
@@ -82,7 +90,8 @@ type ProcessCommand struct {
 	stopCh      chan stopReq
 	waitReadyCh chan waitReadyReq
 
-	// current ProcessState. Written only by run(); read by State() via atomic load.
+	// current stateSnapshot. Written only by run(); read by State() and
+	// StateSince() via atomic load.
 	state atomic.Value
 
 	// stores the active reverse-proxy handler when the process is running.
@@ -114,7 +123,7 @@ func New(
 		waitReadyCh: make(chan waitReadyReq),
 		waitDelay:   cmdWaitDelay,
 	}
-	p.state.Store(StateStopped)
+	p.state.Store(stateSnapshot{state: StateStopped, since: time.Now()})
 
 	go p.run()
 	return p, nil
@@ -133,13 +142,14 @@ func (p *ProcessCommand) run() {
 	// Mutable state — only read/written from this goroutine. ServeHTTP reads
 	// p.handler concurrently, which is why handler is an atomic.Pointer.
 	// p.state mirrors `state` so State() can observe transitions; setState
-	// writes both.
+	// writes both. A no-op transition leaves p.state alone so StateSince()
+	// keeps reporting when the state was actually entered.
 	state := StateStopped
 	setState := func(s ProcessState) {
 		old := state
 		state = s
-		p.state.Store(s)
 		if old != s {
+			p.state.Store(stateSnapshot{state: s, since: time.Now()})
 			event.Emit(swaputil.ProcessStateChangeEvent{
 				ProcessName: p.id,
 				OldState:    string(old),
@@ -741,10 +751,21 @@ func (p *ProcessCommand) Stop(timeout time.Duration) error {
 }
 
 func (p *ProcessCommand) State() ProcessState {
-	if s, ok := p.state.Load().(ProcessState); ok {
+	return p.snapshot().state
+}
+
+func (p *ProcessCommand) Status() (ProcessState, time.Time) {
+	s := p.snapshot()
+	return s.state, s.since
+}
+
+// snapshot returns the last published state/timestamp pair. It is a plain
+// atomic load: it never starts, stops, or otherwise touches the process.
+func (p *ProcessCommand) snapshot() stateSnapshot {
+	if s, ok := p.state.Load().(stateSnapshot); ok {
 		return s
 	}
-	return StateStopped
+	return stateSnapshot{state: StateStopped}
 }
 
 func (p *ProcessCommand) ServeHTTP(w http.ResponseWriter, r *http.Request) {

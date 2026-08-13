@@ -84,6 +84,57 @@ func TestBaseRouter_RunningModels(t *testing.T) {
 	}
 }
 
+// TestBaseRouter_ModelStatus covers what RunningModels cannot: stopped
+// processes are reported rather than omitted, each with the time it entered
+// its current state, and asking never starts anything.
+func TestBaseRouter_ModelStatus(t *testing.T) {
+	stopped := newFakeProcess("stopped")
+	ready := newFakeProcess("ready")
+	before := time.Now()
+	ready.markReady()
+
+	b := newTestBase(t, map[string]process.Process{
+		"ready": ready, "stopped": stopped,
+	}, &stubPlanner{})
+
+	got, ok := b.ModelStatus("ready")
+	if !ok {
+		t.Fatalf("ModelStatus(ready) not found")
+	}
+	if got.State != process.StateReady {
+		t.Errorf("ready state = %q, want ready", got.State)
+	}
+	if got.Since.Before(before) {
+		t.Errorf("ready since = %v, want at or after the transition at %v", got.Since, before)
+	}
+
+	got, ok = b.ModelStatus("stopped")
+	if !ok {
+		t.Fatalf("ModelStatus(stopped) not found: stopped processes must be reported")
+	}
+	if got.State != process.StateStopped {
+		t.Errorf("stopped state = %q, want stopped", got.State)
+	}
+	if got.Since.IsZero() {
+		t.Errorf("stopped since is zero, want the time the process entered the state")
+	}
+
+	if _, ok := b.ModelStatus("unknown"); ok {
+		t.Errorf("ModelStatus(unknown) = found, want not found")
+	}
+
+	// The whole point of the accessor: reading status never starts a process.
+	if n := stopped.runCalls.Load(); n != 0 {
+		t.Errorf("stopped process run calls = %d, want 0", n)
+	}
+	if n := stopped.serveCalls.Load(); n != 0 {
+		t.Errorf("stopped process serve calls = %d, want 0", n)
+	}
+	if got := stopped.State(); got != process.StateStopped {
+		t.Errorf("stopped process state = %q after ModelStatus, want unchanged", got)
+	}
+}
+
 func TestBaseRouter_UnloadAll(t *testing.T) {
 	a := newFakeProcess("a")
 	a.markReady()

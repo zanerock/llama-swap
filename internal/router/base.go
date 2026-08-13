@@ -375,6 +375,20 @@ func (b *baseRouter) RunningModels() map[string]process.ProcessState {
 	return running
 }
 
+// ModelStatus returns the state of one process and when it entered that state.
+// Unlike RunningModels it also reports stopped and shut down processes, so
+// callers can describe every configured model. The processes map keys are fixed
+// at construction and Status() is one atomically published snapshot, so this
+// neither blocks on the run loop nor mutates anything.
+func (b *baseRouter) ModelStatus(modelID string) (ModelStatus, bool) {
+	p, ok := b.processes[modelID]
+	if !ok {
+		return ModelStatus{}, false
+	}
+	state, since := p.Status()
+	return ModelStatus{State: state, Since: since}, true
+}
+
 // Unload stops the named models, or every running model when none are named.
 // It blocks until each targeted process has stopped.
 //

@@ -60,6 +60,12 @@ type Process interface {
 	// and may change at any time after the call returns.
 	State() ProcessState
 
+	// Status returns the current state together with the time the process
+	// entered it, read as one consistent snapshot: State() is the same read
+	// with the timestamp discarded. Like State() it is non-blocking and never
+	// starts or stops anything.
+	Status() (state ProcessState, since time.Time)
+
 	// ServeHTTP forwards requests to the underlying process
 	// Calling it when the process is not ready will result in a
 	// 503 response with a body indicating it is a llama-swap-error
