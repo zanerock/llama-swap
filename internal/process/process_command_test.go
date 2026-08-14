@@ -218,6 +218,55 @@ func TestProcessCommand_StartStop(t *testing.T) {
 	}
 }
 
+// TestProcessCommand_StatusTracksTransitions checks that Status reports when
+// the process entered its current state — the time of the last transition, not
+// the time of the call.
+func TestProcessCommand_StatusTracksTransitions(t *testing.T) {
+	skipIfNoSimpleResponder(t)
+
+	cmd, port := simpleResponderCmd(t, "-silent")
+	created := time.Now()
+	p := newProcessCommand(t, config.ModelConfig{
+		Cmd:                cmd,
+		Proxy:              fmt.Sprintf("http://127.0.0.1:%d", port),
+		CheckEndpoint:      "/health",
+		HealthCheckTimeout: 10,
+	})
+	t.Cleanup(func() { p.Stop(testStopTimeout) }) //nolint: errcheck
+
+	state, initial := p.Status()
+	if state != StateStopped {
+		t.Fatalf("initial state = %s, want %s", state, StateStopped)
+	}
+	if initial.Before(created) {
+		t.Errorf("initial since = %v, want the construction time (at or after %v)", initial, created)
+	}
+
+	runErr := runAsync(t, p)
+	state, ready := p.Status()
+	if state != StateReady {
+		t.Fatalf("state after Run = %s, want %s", state, StateReady)
+	}
+	if !ready.After(initial) {
+		t.Errorf("ready since = %v, want after the previous transition at %v", ready, initial)
+	}
+	if _, again := p.Status(); !again.Equal(ready) {
+		t.Errorf("since = %v on a second read, want the transition time %v", again, ready)
+	}
+
+	if err := p.Stop(testStopTimeout); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	state, stopped := p.Status()
+	if state != StateStopped {
+		t.Fatalf("state after Stop = %s, want %s", state, StateStopped)
+	}
+	if !stopped.After(ready) {
+		t.Errorf("stopped since = %v, want after the ready transition at %v", stopped, ready)
+	}
+	<-runErr
+}
+
 func TestProcessCommand_Run_Idempotent(t *testing.T) {
 	skipIfNoSimpleResponder(t)
 

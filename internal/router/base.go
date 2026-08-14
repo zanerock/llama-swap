@@ -360,6 +360,13 @@ func (b *baseRouter) ProcessLogger(modelID string) (*logmon.Monitor, bool) {
 	return nil, false
 }
 
+// isRunning reports whether a process in this state belongs in the
+// RunningModels and RunningModelStatus listings. Both use it so the two can
+// never disagree about which processes are running.
+func isRunning(st process.ProcessState) bool {
+	return st != process.StateStopped && st != process.StateShutdown
+}
+
 // RunningModels returns the current state of every process that is not stopped
 // or shut down. The processes map keys are fixed at construction and State()
 // is a snapshot, so this is safe to call without the run loop.
@@ -367,10 +374,27 @@ func (b *baseRouter) RunningModels() map[string]process.ProcessState {
 	running := make(map[string]process.ProcessState)
 	for id, p := range b.processes {
 		st := p.State()
-		if st == process.StateStopped || st == process.StateShutdown {
+		if !isRunning(st) {
 			continue
 		}
 		running[id] = st
+	}
+	return running
+}
+
+// RunningModelStatus returns the same processes as RunningModels with each
+// state paired with the time it was entered. Status() publishes both in one
+// atomic store, so an entry can never carry a state from one transition and a
+// timestamp from another. Like RunningModels it neither blocks on the run loop
+// nor mutates anything.
+func (b *baseRouter) RunningModelStatus() map[string]ModelStatus {
+	running := make(map[string]ModelStatus)
+	for id, p := range b.processes {
+		state, since := p.Status()
+		if !isRunning(state) {
+			continue
+		}
+		running[id] = ModelStatus{State: state, Since: since}
 	}
 	return running
 }

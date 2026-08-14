@@ -31,6 +31,13 @@ type Router interface {
 	Handles(model string) bool
 }
 
+// ModelStatus is a read-only snapshot of one local model process: the state it
+// is in and when it entered that state.
+type ModelStatus struct {
+	State process.ProcessState
+	Since time.Time
+}
+
 // LocalRouter is a Router backed by local processes whose state can be
 // inspected and which can be individually stopped. Peer routers, which only
 // forward to remote hosts, do not implement it.
@@ -40,6 +47,18 @@ type LocalRouter interface {
 	// RunningModels returns the current state of every process that is not
 	// stopped or shut down, keyed by model ID.
 	RunningModels() map[string]process.ProcessState
+
+	// RunningModelStatus returns the same set of processes as RunningModels,
+	// each state paired with the time the process entered it. Callers that
+	// need both must use this rather than combining RunningModels with a
+	// per-model lookup: the state and its timestamp come from one atomically
+	// published snapshot, so a transition cannot slip between the two reads
+	// and pair a state with the previous state's timestamp.
+	//
+	// Like RunningModels it is a read of already-published state: it never
+	// starts, stops, or otherwise touches a process, and never blocks on the
+	// router's run loop.
+	RunningModelStatus() map[string]ModelStatus
 
 	// Unload stops the named models, or every running model when none are
 	// named. It blocks until each targeted process has stopped. A timeout <= 0

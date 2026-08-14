@@ -84,6 +84,73 @@ func TestBaseRouter_RunningModels(t *testing.T) {
 	}
 }
 
+// TestBaseRouter_RunningModelStatus covers what RunningModels cannot: each
+// entry also carries when the process entered its state. The listing itself
+// must stay identical to RunningModels, and asking must never start anything.
+func TestBaseRouter_RunningModelStatus(t *testing.T) {
+	before := time.Now()
+	ready := newFakeProcess("ready")
+	ready.markReady()
+	starting := newFakeProcess("starting")
+	starting.setState(process.StateStarting)
+	stopped := newFakeProcess("stopped")
+	shutdown := newFakeProcess("shutdown")
+	shutdown.setState(process.StateShutdown)
+
+	b := newTestBase(t, map[string]process.Process{
+		"ready": ready, "starting": starting, "stopped": stopped, "shutdown": shutdown,
+	}, &stubPlanner{})
+
+	statuses := b.RunningModelStatus()
+	if len(statuses) != 2 {
+		t.Fatalf("statuses=%v want 2 entries", statuses)
+	}
+	for id, want := range map[string]process.ProcessState{
+		"ready":    process.StateReady,
+		"starting": process.StateStarting,
+	} {
+		got, ok := statuses[id]
+		if !ok {
+			t.Fatalf("%s missing from RunningModelStatus", id)
+		}
+		if got.State != want {
+			t.Errorf("%s state=%q want %q", id, got.State, want)
+		}
+		if got.Since.Before(before) {
+			t.Errorf("%s since=%v want at or after the transition at %v", id, got.Since, before)
+		}
+	}
+	for _, id := range []string{"stopped", "shutdown"} {
+		if _, ok := statuses[id]; ok {
+			t.Errorf("%s process should be excluded from RunningModelStatus", id)
+		}
+	}
+
+	// The listing must agree with RunningModels: same models, same states.
+	running := b.RunningModels()
+	if len(running) != len(statuses) {
+		t.Errorf("RunningModels has %d entries, RunningModelStatus has %d; the two must filter identically", len(running), len(statuses))
+	}
+	for id, state := range running {
+		if statuses[id].State != state {
+			t.Errorf("%s: RunningModels state=%q, RunningModelStatus state=%q", id, state, statuses[id].State)
+		}
+	}
+
+	// The whole point of the accessor: reading status never touches a process.
+	for _, p := range []*fakeProcess{ready, starting, stopped, shutdown} {
+		if n := p.runCalls.Load(); n != 0 {
+			t.Errorf("%s run calls = %d, want 0", p.id, n)
+		}
+		if n := p.serveCalls.Load(); n != 0 {
+			t.Errorf("%s serve calls = %d, want 0", p.id, n)
+		}
+		if n := p.stopCalls.Load(); n != 0 {
+			t.Errorf("%s stop calls = %d, want 0", p.id, n)
+		}
+	}
+}
+
 func TestBaseRouter_UnloadAll(t *testing.T) {
 	a := newFakeProcess("a")
 	a.markReady()

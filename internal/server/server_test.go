@@ -31,6 +31,9 @@ type stubRouter struct {
 	unloadModels  []string
 	unloadTimeout time.Duration
 	loggers       map[string]*logmon.Monitor
+	// statuses backs RunningModelStatus. It is separate from running so a
+	// test only has to populate the listing the handler under test reads.
+	statuses map[string]router.ModelStatus
 }
 
 func newStubRouter(models []string, response string) *stubRouter {
@@ -53,6 +56,9 @@ func (s *stubRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *stubRouter) RunningModels() map[string]process.ProcessState { return s.running }
+func (s *stubRouter) RunningModelStatus() map[string]router.ModelStatus {
+	return s.statuses
+}
 func (s *stubRouter) Unload(timeout time.Duration, models ...string) {
 	s.unloadCalls.Add(1)
 	s.unloadTimeout = timeout
