@@ -34,6 +34,10 @@ type stubRouter struct {
 	// statuses backs RunningModelStatus. It is separate from running so a
 	// test only has to populate the listing the handler under test reads.
 	statuses map[string]router.ModelStatus
+	// serveCalls counts dispatches into the router. Listing tests assert it
+	// stays at zero: a dispatch is the only seam through which a request can
+	// make llama-swap load a model.
+	serveCalls atomic.Int32
 }
 
 func newStubRouter(models []string, response string) *stubRouter {
@@ -47,6 +51,7 @@ func newStubRouter(models []string, response string) *stubRouter {
 func (s *stubRouter) Handles(model string) bool      { return s.models[model] }
 func (s *stubRouter) Shutdown(_ time.Duration) error { s.shutdownCalls.Add(1); return nil }
 func (s *stubRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.serveCalls.Add(1)
 	if s.serveHTTP != nil {
 		s.serveHTTP(w, r)
 		return
@@ -304,9 +309,42 @@ func TestServer_Unload(t *testing.T) {
 	}
 }
 
+// getRunning asks the server for /running and decodes the listing.
+func getRunning(t *testing.T, s *Server) []runningModel {
+	t.Helper()
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/running", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%q", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Running []runningModel `json:"running"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v body=%q", err, w.Body.String())
+	}
+	return resp.Running
+}
+
+// addInflight registers n in-flight requests against modelID and removes them
+// again when the test ends.
+func addInflight(t *testing.T, s *Server, modelID string, n int) {
+	t.Helper()
+	for range n {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		req = req.WithContext(swaputil.SetContext(req.Context(),
+			swaputil.ReqContextData{Model: modelID, ModelID: modelID}))
+		id := s.inflight.Add(req, func() {})
+		t.Cleanup(func() { s.inflight.Remove(id) })
+	}
+}
+
 func TestServer_Running(t *testing.T) {
 	local := newStubRouter([]string{"m1"}, "")
-	local.running = map[string]process.ProcessState{"m1": process.StateReady}
+	since := time.Now().Add(-90 * time.Second)
+	local.statuses = map[string]router.ModelStatus{
+		"m1": {State: process.StateReady, Since: since},
+	}
 	s := newTestServer(local, newStubRouter(nil, ""))
 	s.cfg = config.Config{Models: map[string]config.ModelConfig{
 		"m1": {
@@ -318,22 +356,15 @@ func TestServer_Running(t *testing.T) {
 		},
 	}}
 
-	w := httptest.NewRecorder()
-	s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/running", nil))
+	running := getRunning(t, s)
+	if len(running) != 1 {
+		t.Fatalf("running=%v want 1 entry", running)
+	}
+	got := running[0]
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%q", w.Code, w.Body.String())
-	}
-
-	var resp struct {
-		Running []runningModel `json:"running"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v body=%q", err, w.Body.String())
-	}
-	if len(resp.Running) != 1 {
-		t.Fatalf("running=%v want 1 entry", resp.Running)
-	}
+	// Compared field by field rather than with ==: Busy is a pointer, so struct
+	// equality would compare pointer identity, and == on a time.Time compares
+	// the monotonic reading and location as well as the instant.
 	want := runningModel{
 		Model:       "m1",
 		State:       "ready",
@@ -343,8 +374,112 @@ func TestServer_Running(t *testing.T) {
 		Name:        "Model One",
 		Description: "the first model",
 	}
-	if resp.Running[0] != want {
-		t.Errorf("got %+v want %+v", resp.Running[0], want)
+	if got.Model != want.Model || got.State != want.State || got.Cmd != want.Cmd ||
+		got.Proxy != want.Proxy || got.TTL != want.TTL || got.Name != want.Name ||
+		got.Description != want.Description {
+		t.Errorf("got %+v want %+v", got, want)
+	}
+	if got.Busy == nil {
+		t.Fatalf("busy = null for a ready model, want false")
+	}
+	if *got.Busy {
+		t.Errorf("busy = true with nothing in flight, want false")
+	}
+	if got.InFlightRequests != 0 {
+		t.Errorf("in_flight_requests = %d, want 0", got.InFlightRequests)
+	}
+	if !got.Since.Equal(since) {
+		t.Errorf("since = %v, want the transition time %v", got.Since, since)
+	}
+	if loc := got.Since.Location(); loc != time.UTC {
+		t.Errorf("since location = %v, want UTC", loc)
+	}
+	if n := local.serveCalls.Load(); n != 0 {
+		t.Errorf("router dispatches = %d, want 0: listing a model must never load it", n)
+	}
+}
+
+// TestServer_RunningBusyAndInFlight covers the fields /running reports beyond
+// the model's config: busy is null unless the model is ready, in_flight_requests
+// comes from llama-swap's own bookkeeping for that model alone, and since is
+// the model's last transition. None of it dispatches into the router.
+func TestServer_RunningBusyAndInFlight(t *testing.T) {
+	tests := []struct {
+		name         string
+		state        process.ProcessState
+		inFlight     int
+		wantBusyNull bool
+		wantBusy     bool
+	}{
+		{name: "starting is neither busy nor idle", state: process.StateStarting, wantBusyNull: true},
+		{name: "stopping is neither busy nor idle", state: process.StateStopping, wantBusyNull: true},
+		{name: "starting with requests queued is still not busy", state: process.StateStarting, inFlight: 1, wantBusyNull: true},
+		{name: "ready with nothing in flight is idle", state: process.StateReady, wantBusy: false},
+		{name: "ready with requests in flight is busy", state: process.StateReady, inFlight: 2, wantBusy: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			local := newStubRouter([]string{"m1"}, "")
+			since := time.Now().Add(-time.Minute)
+			local.statuses = map[string]router.ModelStatus{
+				"m1": {State: tt.state, Since: since},
+			}
+			s := newTestServer(local, newStubRouter(nil, ""))
+			s.cfg = config.Config{Models: map[string]config.ModelConfig{"m1": {}}}
+
+			addInflight(t, s, "m1", tt.inFlight)
+			// Another model's traffic must not be counted against m1.
+			addInflight(t, s, "m2", 3)
+
+			running := getRunning(t, s)
+			if len(running) != 1 {
+				t.Fatalf("running=%v want 1 entry", running)
+			}
+			got := running[0]
+
+			if got.State != string(tt.state) {
+				t.Errorf("state = %q, want %q", got.State, tt.state)
+			}
+			switch {
+			case tt.wantBusyNull && got.Busy != nil:
+				t.Errorf("busy = %v, want null: a %s model is neither busy nor idle", *got.Busy, tt.state)
+			case !tt.wantBusyNull && got.Busy == nil:
+				t.Fatalf("busy = null, want %v", tt.wantBusy)
+			case !tt.wantBusyNull && *got.Busy != tt.wantBusy:
+				t.Errorf("busy = %v, want %v", *got.Busy, tt.wantBusy)
+			}
+			if got.InFlightRequests != tt.inFlight {
+				t.Errorf("in_flight_requests = %d, want %d", got.InFlightRequests, tt.inFlight)
+			}
+			if !got.Since.Equal(since) {
+				t.Errorf("since = %v, want the transition time %v", got.Since, since)
+			}
+			if n := local.serveCalls.Load(); n != 0 {
+				t.Errorf("router dispatches = %d, want 0: listing a model must never load it", n)
+			}
+		})
+	}
+}
+
+// TestServer_RunningExcludesStoppedModels pins the endpoint's existing
+// contract: /running lists what the router reports as running and nothing
+// else, so a configured but unloaded model stays absent rather than gaining
+// an entry from the new fields.
+func TestServer_RunningExcludesStoppedModels(t *testing.T) {
+	local := newStubRouter([]string{"m1", "m2"}, "")
+	local.statuses = map[string]router.ModelStatus{
+		"m1": {State: process.StateReady, Since: time.Now()},
+	}
+	s := newTestServer(local, newStubRouter(nil, ""))
+	s.cfg = config.Config{Models: map[string]config.ModelConfig{"m1": {}, "m2": {}}}
+
+	running := getRunning(t, s)
+	if len(running) != 1 || running[0].Model != "m1" {
+		t.Fatalf("running=%+v want only m1", running)
+	}
+	if n := local.serveCalls.Load(); n != 0 {
+		t.Errorf("router dispatches = %d, want 0", n)
 	}
 }
 

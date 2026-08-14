@@ -309,7 +309,10 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// runningModel is one entry in the /running listing.
+// runningModel is one entry in the /running listing. Every field is explicit:
+// clients pin an allow-list against this shape and treat an unexpected key as a
+// breaking change, so it must never be widened by accident (no maps, no
+// embedded config structs, no request or response payload data of any kind).
 type runningModel struct {
 	Model       string `json:"model"`
 	State       string `json:"state"`
@@ -318,6 +321,16 @@ type runningModel struct {
 	TTL         int    `json:"ttl"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
+
+	// Busy is null unless State is "ready". A model that is still starting or
+	// stopping is neither busy nor idle, and reporting false would assert an
+	// idleness that is not true.
+	Busy *bool `json:"busy"`
+	// InFlightRequests is how many requests llama-swap currently has in flight
+	// to this model.
+	InFlightRequests int `json:"in_flight_requests"`
+	// Since is when the model entered State, not when it was last observed.
+	Since time.Time `json:"since"`
 }
 
 // handleUnload stops every running local process. Peer models are remote and
@@ -329,21 +342,37 @@ func (s *Server) handleUnload(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleRunning lists local processes that are not stopped, joining each model
-// ID against its config for the cmd/proxy/ttl/name/description metadata.
+// ID against its config for the cmd/proxy/ttl/name/description metadata and
+// against llama-swap's own bookkeeping for state, since and in-flight requests.
+//
+// It is strictly a read of already-published state: no model is loaded,
+// unloaded, health checked, or otherwise touched, and nothing here blocks on a
+// swap, so a client can poll it safely.
 func (s *Server) handleRunning(w http.ResponseWriter, r *http.Request) {
-	states := s.local.RunningModels()
-	list := make([]runningModel, 0, len(states))
-	for id, state := range states {
+	statuses := s.local.RunningModelStatus()
+	// One scan of the in-flight tracker serves the whole listing; the loop
+	// below only indexes the result.
+	inFlight := s.inflight.CountByModel()
+
+	list := make([]runningModel, 0, len(statuses))
+	for id, status := range statuses {
 		mc := s.cfg.Models[id]
-		list = append(list, runningModel{
-			Model:       id,
-			State:       string(state),
-			Cmd:         mc.Cmd,
-			Proxy:       mc.Proxy,
-			TTL:         mc.UnloadAfter,
-			Name:        mc.Name,
-			Description: mc.Description,
-		})
+		entry := runningModel{
+			Model:            id,
+			State:            string(status.State),
+			Cmd:              mc.Cmd,
+			Proxy:            mc.Proxy,
+			TTL:              mc.UnloadAfter,
+			Name:             mc.Name,
+			Description:      mc.Description,
+			InFlightRequests: inFlight[id],
+			Since:            status.Since.UTC(),
+		}
+		if status.State == process.StateReady {
+			busy := entry.InFlightRequests > 0
+			entry.Busy = &busy
+		}
+		list = append(list, entry)
 	}
 	sort.Slice(list, func(i, j int) bool { return list[i].Model < list[j].Model })
 
