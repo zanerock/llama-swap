@@ -10,6 +10,7 @@ import (
 
 const DEFAULT_GROUP_ID = "(default)"
 const DEFAULT_UNLOAD_TIMEOUT = 10
+const DEFAULT_BUSY_GRACE_PERIOD = 10
 const (
 	LogToStdoutProxy    = "proxy"
 	LogToStdoutUpstream = "upstream"
@@ -132,21 +133,26 @@ func (c *ProfileConfig) UnmarshalYAML(value *yaml.Node) error {
 }
 
 type Config struct {
-	HealthCheckTimeout int                       `yaml:"healthCheckTimeout"`
-	LogRequests        bool                      `yaml:"logRequests"`
-	LogLevel           string                    `yaml:"logLevel"`
-	LogTimeFormat      string                    `yaml:"logTimeFormat"`
-	LogToStdout        string                    `yaml:"logToStdout"`
-	MetricsMaxInMemory int                       `yaml:"metricsMaxInMemory"`
-	CaptureBuffer      int                       `yaml:"captureBuffer"`
-	Store              *Store                    `yaml:"store"`
-	UI                 UIConfig                  `yaml:"ui"`
-	Performance        PerformanceConfig         `yaml:"performance"`
-	GlobalTTL          int                       `yaml:"globalTTL"`
-	UnloadTimeout      int                       `yaml:"unloadTimeout"`
-	Models             map[string]ModelConfig    `yaml:"models"` /* key is model ID */
-	Profiles           map[string]ProfileConfig  `yaml:"profiles"`
-	Selectors          map[string]SelectorConfig `yaml:"selectors"`
+	HealthCheckTimeout int               `yaml:"healthCheckTimeout"`
+	LogRequests        bool              `yaml:"logRequests"`
+	LogLevel           string            `yaml:"logLevel"`
+	LogTimeFormat      string            `yaml:"logTimeFormat"`
+	LogToStdout        string            `yaml:"logToStdout"`
+	MetricsMaxInMemory int               `yaml:"metricsMaxInMemory"`
+	CaptureBuffer      int               `yaml:"captureBuffer"`
+	Store              *Store            `yaml:"store"`
+	UI                 UIConfig          `yaml:"ui"`
+	Performance        PerformanceConfig `yaml:"performance"`
+	GlobalTTL          int               `yaml:"globalTTL"`
+	UnloadTimeout      int               `yaml:"unloadTimeout"`
+	// BusyGracePeriod is how many seconds busy stays true in /running after a
+	// model's last in-flight request completes, even once in_flight_requests
+	// returns to 0. 0 disables the extension: busy flips to false the instant
+	// in_flight_requests reaches 0.
+	BusyGracePeriod int                       `yaml:"busyGracePeriod"`
+	Models          map[string]ModelConfig    `yaml:"models"` /* key is model ID */
+	Profiles        map[string]ProfileConfig  `yaml:"profiles"`
+	Selectors       map[string]SelectorConfig `yaml:"selectors"`
 
 	// routing is the canonical source for swap/scheduling configuration.
 	// New code must read Routing, never the backwards-compat fields below.

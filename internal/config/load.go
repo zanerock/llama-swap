@@ -46,6 +46,7 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 		CaptureBuffer:      5,
 		GlobalTTL:          0,
 		UnloadTimeout:      DEFAULT_UNLOAD_TIMEOUT,
+		BusyGracePeriod:    DEFAULT_BUSY_GRACE_PERIOD,
 		UI: UIConfig{Activity: UIActivityConfig{SessionID: []string{
 			"X-Session-ID",
 			"X-Litellm-Session-Id",
@@ -85,6 +86,10 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 	}
 	if config.UnloadTimeout == 0 {
 		config.UnloadTimeout = DEFAULT_UNLOAD_TIMEOUT
+	}
+
+	if config.BusyGracePeriod < 0 {
+		return Config{}, fmt.Errorf("busyGracePeriod must be >= 0")
 	}
 
 	config.UI.Activity.SessionID = normalizeHeaderNames(config.UI.Activity.SessionID)

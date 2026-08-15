@@ -53,6 +53,11 @@ type inflightTracker struct {
 	// request updates keep the same order in which they were applied.
 	mu       sync.RWMutex
 	requests map[string]*inflightRequest
+	// lastCompletion records, per model ID, the time of the most recent
+	// Remove() for that model. It backs /running's busy grace period: a
+	// model can show 0 in-flight requests while still being within its
+	// grace window. Guarded by mu, same as requests.
+	lastCompletion map[string]time.Time
 
 	updates          chan swaputil.InFlightRequestsEvent
 	needsSnapshot    atomic.Bool
@@ -75,9 +80,10 @@ func newInflightTracker() *inflightTracker {
 
 func newInflightTrackerWithPublisher(size int, publish func(swaputil.InFlightRequestsEvent)) *inflightTracker {
 	t := &inflightTracker{
-		requests: make(map[string]*inflightRequest),
-		updates:  make(chan swaputil.InFlightRequestsEvent, size),
-		publish:  publish,
+		requests:       make(map[string]*inflightRequest),
+		lastCompletion: make(map[string]time.Time),
+		updates:        make(chan swaputil.InFlightRequestsEvent, size),
+		publish:        publish,
 	}
 	return t
 }
@@ -114,6 +120,9 @@ func (t *inflightTracker) Remove(id string) {
 		delete(t.requests, id)
 		if req.timer != nil {
 			req.timer.Stop()
+		}
+		if req.entry.Model != "" {
+			t.lastCompletion[req.entry.Model] = time.Now()
 		}
 		t.enqueueLocked(swaputil.InFlightRequestsEvent{Operation: inflightOperationRemove, ID: id})
 	}
@@ -267,6 +276,23 @@ func (t *inflightTracker) CountByModel() map[string]int {
 		counts[req.entry.Model]++
 	}
 	return counts
+}
+
+// LastCompletionByModel returns, for each model ID that has had at least one
+// request removed from the tracker, the time of its most recent removal. It
+// backs /running's busy grace period. The read lock is only ever held for
+// one short map scan, so this never blocks on a model load. Callers listing
+// several models should call it once and index the result rather than
+// calling it per model.
+func (t *inflightTracker) LastCompletionByModel() map[string]time.Time {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	out := make(map[string]time.Time, len(t.lastCompletion))
+	for model, at := range t.lastCompletion {
+		out[model] = at
+	}
+	return out
 }
 
 func (t *inflightTracker) snapshotLocked() []swaputil.InflightRequestEntry {

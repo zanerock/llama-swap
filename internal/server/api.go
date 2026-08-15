@@ -324,7 +324,11 @@ type runningModel struct {
 
 	// Busy is null unless State is "ready". A model that is still starting or
 	// stopping is neither busy nor idle, and reporting false would assert an
-	// idleness that is not true.
+	// idleness that is not true. For a ready model, busy remains true for
+	// BusyGracePeriod seconds after the model's last in-flight request
+	// completes, even once InFlightRequests returns to 0, so a caller
+	// polling between turns of a multi-turn conversation does not see a
+	// false idle reading between calls.
 	Busy *bool `json:"busy"`
 	// InFlightRequests is how many requests llama-swap currently has in flight
 	// to this model.
@@ -353,6 +357,8 @@ func (s *Server) handleRunning(w http.ResponseWriter, r *http.Request) {
 	// One scan of the in-flight tracker serves the whole listing; the loop
 	// below only indexes the result.
 	inFlight := s.inflight.CountByModel()
+	lastCompletion := s.inflight.LastCompletionByModel()
+	grace := time.Duration(s.cfg.BusyGracePeriod) * time.Second
 
 	list := make([]runningModel, 0, len(statuses))
 	for id, status := range statuses {
@@ -370,6 +376,11 @@ func (s *Server) handleRunning(w http.ResponseWriter, r *http.Request) {
 		}
 		if status.State == process.StateReady {
 			busy := entry.InFlightRequests > 0
+			if !busy && grace > 0 {
+				if last, ok := lastCompletion[id]; ok && time.Since(last) < grace {
+					busy = true
+				}
+			}
 			entry.Busy = &busy
 		}
 		list = append(list, entry)

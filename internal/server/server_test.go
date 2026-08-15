@@ -339,6 +339,19 @@ func addInflight(t *testing.T, s *Server, modelID string, n int) {
 	}
 }
 
+// completeInflight simulates one already-finished request against modelID:
+// it registers with the tracker and immediately removes itself, so
+// LastCompletionByModel records the completion time without leaving
+// in_flight_requests non-zero.
+func completeInflight(t *testing.T, s *Server, modelID string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req = req.WithContext(swaputil.SetContext(req.Context(),
+		swaputil.ReqContextData{Model: modelID, ModelID: modelID}))
+	id := s.inflight.Add(req, func() {})
+	s.inflight.Remove(id)
+}
+
 func TestServer_Running(t *testing.T) {
 	local := newStubRouter([]string{"m1"}, "")
 	since := time.Now().Add(-90 * time.Second)
@@ -460,6 +473,127 @@ func TestServer_RunningBusyAndInFlight(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestServer_RunningBusyGracePeriod covers the busyGracePeriod extension:
+// busy stays true for the configured window after a model's last in-flight
+// request completes, even with in_flight_requests back at 0, reverts once
+// the window elapses, and a grace period of 0 reproduces the pre-extension
+// behavior exactly. State-null precedence and per-model isolation are
+// unconditional even with a live grace window.
+func TestServer_RunningBusyGracePeriod(t *testing.T) {
+	t.Run("holds busy true within the grace window after completion", func(t *testing.T) {
+		local := newStubRouter([]string{"m1"}, "")
+		local.statuses = map[string]router.ModelStatus{
+			"m1": {State: process.StateReady, Since: time.Now()},
+		}
+		s := newTestServer(local, newStubRouter(nil, ""))
+		s.cfg = config.Config{BusyGracePeriod: 1, Models: map[string]config.ModelConfig{"m1": {}}}
+
+		completeInflight(t, s, "m1")
+
+		running := getRunning(t, s)
+		if len(running) != 1 {
+			t.Fatalf("running=%v want 1 entry", running)
+		}
+		got := running[0]
+		if got.InFlightRequests != 0 {
+			t.Errorf("in_flight_requests = %d, want 0", got.InFlightRequests)
+		}
+		if got.Busy == nil || !*got.Busy {
+			t.Fatalf("busy = %v, want true: within the grace window after completion", got.Busy)
+		}
+	})
+
+	t.Run("reverts to false once the grace window has elapsed", func(t *testing.T) {
+		local := newStubRouter([]string{"m1"}, "")
+		local.statuses = map[string]router.ModelStatus{
+			"m1": {State: process.StateReady, Since: time.Now()},
+		}
+		s := newTestServer(local, newStubRouter(nil, ""))
+		s.cfg = config.Config{BusyGracePeriod: 1, Models: map[string]config.ModelConfig{"m1": {}}}
+
+		completeInflight(t, s, "m1")
+		time.Sleep(1100 * time.Millisecond)
+
+		running := getRunning(t, s)
+		if len(running) != 1 {
+			t.Fatalf("running=%v want 1 entry", running)
+		}
+		got := running[0]
+		if got.Busy == nil || *got.Busy {
+			t.Fatalf("busy = %v, want false: the grace window has elapsed", got.Busy)
+		}
+	})
+
+	t.Run("grace period of 0 reproduces the pre-extension behavior", func(t *testing.T) {
+		local := newStubRouter([]string{"m1"}, "")
+		local.statuses = map[string]router.ModelStatus{
+			"m1": {State: process.StateReady, Since: time.Now()},
+		}
+		s := newTestServer(local, newStubRouter(nil, ""))
+		s.cfg = config.Config{BusyGracePeriod: 0, Models: map[string]config.ModelConfig{"m1": {}}}
+
+		completeInflight(t, s, "m1")
+
+		running := getRunning(t, s)
+		if len(running) != 1 {
+			t.Fatalf("running=%v want 1 entry", running)
+		}
+		got := running[0]
+		if got.Busy == nil || *got.Busy {
+			t.Fatalf("busy = %v, want false: busyGracePeriod=0 disables the extension", got.Busy)
+		}
+	})
+
+	t.Run("state != ready forces busy null regardless of a live grace window", func(t *testing.T) {
+		local := newStubRouter([]string{"m1"}, "")
+		local.statuses = map[string]router.ModelStatus{
+			"m1": {State: process.StateStopping, Since: time.Now()},
+		}
+		s := newTestServer(local, newStubRouter(nil, ""))
+		s.cfg = config.Config{BusyGracePeriod: 30, Models: map[string]config.ModelConfig{"m1": {}}}
+
+		completeInflight(t, s, "m1")
+
+		running := getRunning(t, s)
+		if len(running) != 1 {
+			t.Fatalf("running=%v want 1 entry", running)
+		}
+		got := running[0]
+		if got.Busy != nil {
+			t.Errorf("busy = %v, want null: state is not ready", *got.Busy)
+		}
+	})
+
+	t.Run("another model's completion does not extend this model's grace window", func(t *testing.T) {
+		local := newStubRouter([]string{"m1", "m2"}, "")
+		local.statuses = map[string]router.ModelStatus{
+			"m1": {State: process.StateReady, Since: time.Now()},
+			"m2": {State: process.StateReady, Since: time.Now()},
+		}
+		s := newTestServer(local, newStubRouter(nil, ""))
+		s.cfg = config.Config{
+			BusyGracePeriod: 30,
+			Models:          map[string]config.ModelConfig{"m1": {}, "m2": {}},
+		}
+
+		completeInflight(t, s, "m2")
+
+		running := getRunning(t, s)
+		var m1 *runningModel
+		for i := range running {
+			if running[i].Model == "m1" {
+				m1 = &running[i]
+			}
+		}
+		if m1 == nil {
+			t.Fatalf("m1 missing from running=%v", running)
+		}
+		if m1.Busy == nil || *m1.Busy {
+			t.Fatalf("m1 busy = %v, want false: m2's completion must not extend m1's grace window", m1.Busy)
+		}
+	})
 }
 
 // TestServer_RunningExcludesStoppedModels pins the endpoint's existing

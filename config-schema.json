@@ -176,6 +176,12 @@
             "default": 10,
             "description": "Graceful timeout in seconds when unloading a model (manual, API, or TTL expiry) before force-killing the model process. 0 uses the default of 10 seconds."
         },
+        "busyGracePeriod": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 10,
+            "description": "Number of seconds /running's busy stays true for a ready model after its last in-flight request completes, even once in_flight_requests returns to 0. 0 disables the grace period: busy flips to false the instant in_flight_requests reaches 0."
+        },
         "logLevel": {
             "type": "string",
             "enum": [

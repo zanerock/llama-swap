@@ -198,6 +198,7 @@ groups:
 		},
 		SendLoadingState: false,
 		UnloadTimeout:    DEFAULT_UNLOAD_TIMEOUT,
+		BusyGracePeriod:  DEFAULT_BUSY_GRACE_PERIOD,
 		Models: map[string]ModelConfig{
 			"model1": {
 				Cmd:                "path/to/cmd --arg1 one",
